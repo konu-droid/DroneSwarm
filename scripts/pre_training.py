@@ -1,4 +1,5 @@
 import os
+import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -7,11 +8,12 @@ from time import sleep
 # create isaac environment
 from omni.isaac.gym.vec_env import VecEnvBase
 
-env = VecEnvBase(headless=False)
+env = VecEnvBase(headless=True)
 # when you need all the extensions of isaac sim use the below line
 #  env = VecEnvBase(headless=False, experience=f'{os.environ["EXP_PATH"]}/omni.isaac.sim.python.kit')
 
-from sim.crazy_task import CarzyFlyTask
+sys.path.append("/home/konu/Documents/mini_drone/DroneSwarm/sim/")
+from crazy_task import CarzyFlyTask
 
 class SelfAttention(nn.Module):
     def __init__(self, embed_dim, num_heads):
@@ -54,6 +56,9 @@ def update_obs(obs_batch, next_obs):
     obs_batch[:, -1] = next_obs
     return obs_batch
 
+# Check for GPU
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 task = CarzyFlyTask(name="Fly")
 env.set_task(task, backend="torch")
 env._world.reset()
@@ -61,7 +66,7 @@ obs, _ = env.reset()
 
 # Example usage    
 seq_len = 5
-obs_dim = 4
+obs_dim = 13 #[x, y, z, quad_x, quad_y, quad_z, quad_w, vx, vy, vz, wx, wy, wz]
 goal_dim = 2
 embed_dim = 8
 num_heads = 2
@@ -72,37 +77,37 @@ action_dim = 4
 epochs = 100
 learning_rate = 0.001
 batch_size = 1
-episode_length = 10
+episode_length = 1000
 
 # Initialize models
-model = RLAttentionNetwork(action_dim, obs_dim, embed_dim, num_heads, hidden_dim, seq_len)
+model = RLAttentionNetwork(action_dim, obs_dim, embed_dim, num_heads, hidden_dim, seq_len).to(device)
 criterion = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
 # Init action and observation vars
-actions = torch.randn(batch_size, seq_len, action_dim)  # (batch_size, seq_len, action_dim)
-observations = torch.zeros(batch_size, seq_len, obs_dim)  # (batch_size, seq_len, obs_dim)
-next_observations = torch.zeros(batch_size, seq_len, obs_dim)  # (batch_size, seq_len, obs_dim)
-goal = torch.randn(batch_size, goal_dim)  # (batch_size, goal_dim)
-
-# Get atleast 2 observations, put the observations at the end
-for i in range(seq_len):
-    # Update observations buffer in FIFO manner
-    observations[:, :-1, :] = observations[:, 1:, :]
-    observations[:, -1, :] = env.step(actions[i])
-
-next_observations[:, :-1, :] = observations[:, 1:, :]
+actions = torch.rand(batch_size, seq_len, action_dim).to(device) - 0.5  # (batch_size, seq_len, action_dim)
+observations = torch.zeros(batch_size, seq_len, obs_dim).to(device)  # (batch_size, seq_len, obs_dim)
+next_observations = torch.zeros(batch_size, seq_len, obs_dim).to(device)  # (batch_size, seq_len, obs_dim)
+goal = torch.randn(batch_size, goal_dim).to(device)  # (batch_size, goal_dim)
 
 for epoch in range(epochs):
     # load dataset
-    for time in episode_length:
+    # Get atleast 2 observations, put the observations at the end
+    for i in range(seq_len):
+        # Update observations buffer in FIFO manner
+        observations[:, :-1, :] = observations[:, 1:, :].clone()
+        observations[:, -1, :] = env.step(actions[:, i, :])[0]
+
+    next_observations[:, :-1, :] = observations[:, 1:, :]
+
+    for time in range(episode_length):
         # Forward pass
         predict_next_observations = model(actions, observations)
         
         #get the next obs
-        new_obs = env.step(actions[i])
-        next_observations[:, :-1, :] = next_observations[:, 1:, :]
-        next_observations[:, -1, :] = env.step(actions[i])
+        new_obs = env.step(actions[:, seq_len - 1, :])[0]
+        next_observations[:, :-1, :] = next_observations[:, 1:, :].clone()
+        next_observations[:, -1, :] = new_obs
 
         # Compute loss (using observations as target for demonstration)
         loss = criterion(predict_next_observations, next_observations)
@@ -113,11 +118,14 @@ for epoch in range(epochs):
         optimizer.step()
 
         # Update observations buffer in FIFO manner
-        observations[:, :-1, :] = observations[:, 1:, :]
+        observations[:, :-1, :] = observations[:, 1:, :].clone()
         observations[:, -1, :] = new_obs
 
         #update actions buffer in FIFO manner
-        actions[:, :-1, :] = actions[:, 1:, :]
-        actions[:, -1, :] = torch.randn(batch_size, 1, action_dim)
+        actions[:, :-1, :] = actions[:, 1:, :].clone()
+        actions[:, -1, :] = torch.rand(batch_size, 1, action_dim) - 0.5
 
+    env.reset()
     print(f'Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f}')
+
+env.close()

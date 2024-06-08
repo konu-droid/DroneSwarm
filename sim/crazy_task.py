@@ -26,7 +26,7 @@ class CarzyFlyTask(BaseTask):
         self._max_push_effort = 400.0
 
         # values used for defining RL buffers
-        self._num_observations = 8
+        self._num_observations = 13
         self._num_actions = 4
         self._device = "cpu"
         self.num_envs = 1
@@ -131,12 +131,10 @@ class CarzyFlyTask(BaseTask):
         num_resets = len(env_ids)
 
         # randomize DOF velocities
-        dof_vel = torch.zeros((num_resets, self._flies.num_dof), device=self._device)
-        dof_vel[:, self._fly_m1_dof_idx] = 0.1  # 0.5 * (1.0 - 2.0 * torch.rand(num_resets, device=self._device))
-        dof_vel[:, self._fly_m2_dof_idx] = 0.1  # 0.5 * (1.0 - 2.0 * torch.rand(num_resets, device=self._device))
-        dof_vel[:, self._fly_m3_dof_idx] = 0.1  # 0.5 * (1.0 - 2.0 * torch.rand(num_resets, device=self._device))
-        dof_vel[:, self._fly_m4_dof_idx] = 0.1  # 0.5 * (1.0 - 2.0 * torch.rand(num_resets, device=self._device))
-        print(f"dof_vel: {dof_vel}")
+        self.dof_vel[:, self._fly_m1_dof_idx] = 0.1  # 0.5 * (1.0 - 2.0 * torch.rand(num_resets, device=self._device))
+        self.dof_vel[:, self._fly_m2_dof_idx] = 0.1  # 0.5 * (1.0 - 2.0 * torch.rand(num_resets, device=self._device))
+        self.dof_vel[:, self._fly_m3_dof_idx] = 0.1  # 0.5 * (1.0 - 2.0 * torch.rand(num_resets, device=self._device))
+        self.dof_vel[:, self._fly_m4_dof_idx] = 0.1  # 0.5 * (1.0 - 2.0 * torch.rand(num_resets, device=self._device))
 
         fly_positions = torch.zeros((num_resets, 3), device=self._device)
         fly_positions[:, 0] = torch.arange(num_resets)
@@ -145,7 +143,7 @@ class CarzyFlyTask(BaseTask):
 
         # apply resets
         indices = env_ids.to(dtype=torch.int32)
-        self._flies.set_joint_velocities(dof_vel, indices=indices)
+        self._flies.set_joint_velocities(self.dof_vel, indices=indices)
         self._flies.set_world_poses(fly_positions, fly_orientations, indices=indices)
 
         # bookkeeping
@@ -153,34 +151,12 @@ class CarzyFlyTask(BaseTask):
 
     def pre_physics_step(self, actions) -> None:
         # print(" Innnnnnnnnnnnnnnnnnnnnnnn pre_physics_step")
+
         reset_env_ids = self.resets.nonzero(as_tuple=False).squeeze(-1)
         if len(reset_env_ids) > 0:
-            self.reset(reset_env_ids)
+            self.reset_idx(reset_env_ids)
 
-        actions = torch.tensor(actions)
-
-        forces = torch.zeros(
-            (self._flies.count, self._flies.num_dof, 3),
-            dtype=torch.float32,
-            device=self._device,
-        )
-        forces[:, self._fly_m1_dof_idx, 2] = actions[0]
-        forces[:, self._fly_m2_dof_idx, 2] = actions[0]
-        forces[:, self._fly_m3_dof_idx, 2] = actions[0]
-        forces[:, self._fly_m4_dof_idx, 2] = actions[0]
-
-        prop_rot = torch.zeros(
-            (self._flies.count, self._flies.num_dof),
-            dtype=torch.float32,
-            device=self._device,
-        )
-        prop_rot[:, self._fly_m1_dof_idx] = actions[0] * 1000
-        prop_rot[:, self._fly_m2_dof_idx] = -actions[0] * 1000
-        prop_rot[:, self._fly_m3_dof_idx] = actions[0] * 1000
-        prop_rot[:, self._fly_m4_dof_idx] = -actions[0] * 1000
-
-
-        ###########################
+        actions = actions.clone().to(self._device)
         self.actions = actions
 
         # clamp to [-1.0, 1.0]
@@ -241,11 +217,21 @@ class CarzyFlyTask(BaseTask):
 
         # clear actions for reset envs
         self.thrusts[reset_env_ids] = 0
-        ###########################
 
-        self._flies.set_joint_velocities(prop_rot, indices=self.all_indices)
+        # spin spinning rotors
+        prop_rot = self.thrust_cmds_damp * self.prop_max_rot
 
-        print(self.thrusts)
+        dof_vel = torch.zeros(
+            (self._flies.count, self._flies.num_dof),
+            dtype=torch.float32,
+            device=self._device,
+        )
+        dof_vel[:, self._fly_m1_dof_idx] = prop_rot[:, 0]
+        dof_vel[:, self._fly_m2_dof_idx] = -1.0 * prop_rot[:, 1]
+        dof_vel[:, self._fly_m3_dof_idx] = prop_rot[:, 2]
+        dof_vel[:, self._fly_m4_dof_idx] = -1.0 * prop_rot[:, 3]
+
+        self._flies.set_joint_velocities(dof_vel)
 
         # apply actions
         for i in range(4):
@@ -254,28 +240,11 @@ class CarzyFlyTask(BaseTask):
     def get_observations(self):
         # # print(" Innnnnnnnnnnnnnnnnnnnnnnn get_observations")
         self.root_pos, self.root_rot = self._flies.get_world_poses(clone=False)
-        # self.root_velocities = self._flies.get_velocities(clone=False)
+        self.root_velocities = self._flies.get_velocities(clone=False)
 
-        # root_positions = self.root_pos - self._env_pos
-        # root_quats = self.root_rot
-
-        # rot_x = quat_axis(root_quats, 0)
-        # rot_y = quat_axis(root_quats, 1)
-        # rot_z = quat_axis(root_quats, 2)
-
-        # root_linvels = self.root_velocities[:, :3]
-        # root_angvels = self.root_velocities[:, 3:]
-
-        # self.obs_buf[..., 0:3] = self.target_positions - root_positions
-
-        # self.obs_buf[..., 3:6] = rot_x
-        # self.obs_buf[..., 6:9] = rot_y
-        # self.obs_buf[..., 9:12] = rot_z
-
-        # self.obs_buf[..., 12:15] = root_linvels
-        # self.obs_buf[..., 15:18] = root_angvels
-
-        # self.obs = {self._flies.name: {"obs_buf": self.obs_buf}}
+        self.obs[..., 0:3] = self.root_pos
+        self.obs[..., 3:7] = self.root_rot
+        self.obs[..., 7:] = self.root_velocities
 
         return self.obs
 
